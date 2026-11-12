@@ -1,8 +1,10 @@
-import joblib
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import tensorflow as tf
+from sklearn.preprocessing import StandardScaler
 
 
 st.set_page_config(page_title="Student Performance Prediction", page_icon="🎓")
@@ -128,23 +130,74 @@ def render_student_input(column, default_value, metadata):
     )
 
 
+@st.cache_resource(show_spinner="Training the Deep Neural Network…")
+def train_model(data_path, data_modified_time):
+    """Train the DNN and prepare the form data once for each app startup."""
+    del data_modified_time  # Include the CSV's timestamp in Streamlit's cache key.
+    tf.keras.utils.set_random_seed(42)
+
+    data = pd.read_csv(data_path, sep=";")
+    features_raw = data.drop("G3", axis=1)
+    grades = data["G3"]
+    numeric_columns = features_raw.select_dtypes(include=np.number).columns.tolist()
+    categorical_columns = features_raw.select_dtypes(exclude=np.number).columns.tolist()
+
+    features = pd.get_dummies(features_raw, columns=categorical_columns, dtype=float)
+    scaler = StandardScaler()
+    features[numeric_columns] = scaler.fit_transform(features[numeric_columns])
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(features.shape[1],)),
+        tf.keras.layers.Dense(32, activation="relu"),
+        tf.keras.layers.Dense(16, activation="relu"),
+        tf.keras.layers.Dense(1),
+    ])
+    model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss", patience=5, restore_best_weights=True
+    )
+    model.fit(
+        features, grades, validation_split=0.20, epochs=40, batch_size=16,
+        callbacks=[early_stop], verbose=0,
+    )
+
+    metadata = {
+        "model_columns": features.columns.tolist(),
+        "raw_columns": features_raw.columns.tolist(),
+        "numeric_columns": numeric_columns,
+        "categorical_columns": categorical_columns,
+        "categorical_options": {
+            column: sorted(features_raw[column].unique())
+            for column in categorical_columns
+        },
+        "defaults": {
+            column: (
+                features_raw[column].median()
+                if column in numeric_columns
+                else features_raw[column].mode()[0]
+            )
+            for column in features_raw.columns
+        },
+    }
+    return model, scaler, metadata
+
+
 try:
-    # Load the models and preprocessing files created by the notebook.
-    dnn_model = tf.keras.models.load_model("dnn_model.keras")
-    random_forest = joblib.load("random_forest.pkl")
-    scaler = joblib.load("scaler.pkl")
-    metadata = joblib.load("feature_columns.pkl")
+    DATA_PATH = "student-mat.csv"
+    dnn_model, scaler, metadata = train_model(
+        DATA_PATH, Path(DATA_PATH).stat().st_mtime_ns
+    )
 except FileNotFoundError:
-    st.error("Model files were not found. Run Student_Performance_Prediction.ipynb first.")
+    st.error("student-mat.csv was not found. Keep it in the same folder as app.py.")
     st.stop()
 
 
 st.title("🎓 Student Academic Performance Prediction")
 st.write(
     "Enter a student's Mathematics-course details to estimate the final grade (out of 20) "
-    "with a Deep Neural Network and a Random Forest model."
+    "with a Deep Neural Network."
 )
-st.caption("The app loads pre-trained models only; it does not retrain them.")
+st.caption("The app trains the DNN when it starts; it does not save model files.")
 
 with st.form("student_details_form"):
     # Start with the saved typical values, then let the user change them.
@@ -179,19 +232,12 @@ if submitted:
         prepared_features[metadata["numeric_columns"]]
     )
 
-    # Each model makes its own prediction from the same prepared row.
+    # The DNN predicts the final grade from the prepared row.
     dnn_grade = float(dnn_model.predict(prepared_features, verbose=0)[0][0])
-    random_forest_grade = float(random_forest.predict(prepared_features)[0])
 
     # Grades in the original data range from 0 to 20.
     dnn_grade = float(np.clip(dnn_grade, 0, 20))
-    random_forest_grade = float(np.clip(random_forest_grade, 0, 20))
 
     st.subheader("Prediction Results")
-    dnn_column, forest_column = st.columns(2)
-    with dnn_column:
-        st.metric("Deep Neural Network", f"{dnn_grade:.2f} / 20")
-        st.info(f"Category: {performance_category(dnn_grade)}")
-    with forest_column:
-        st.metric("Random Forest", f"{random_forest_grade:.2f} / 20")
-        st.info(f"Category: {performance_category(random_forest_grade)}")
+    st.metric("Deep Neural Network", f"{dnn_grade:.2f} / 20")
+    st.info(f"Category: {performance_category(dnn_grade)}")

@@ -5,5 +5,4 @@ seaborn
 scikit-learn
 tensorflow==2.16.1
 streamlit==1.34.0
-joblib
 jupyter
